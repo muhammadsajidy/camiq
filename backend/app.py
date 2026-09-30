@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
+# pyrefly: ignore [missing-import]
 import siglip_engine as engine
 
 # ----------------------------
@@ -201,6 +202,7 @@ async def stream_video(request: Request):
             while chunk := f.read(CHUNK):
                 yield chunk
 
+    filename = Path(video_path).name
     return StreamingResponse(
         iter_full(),
         media_type="video/mp4",
