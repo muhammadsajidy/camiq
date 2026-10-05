@@ -13,4 +13,7 @@ cctv.mp4
 cctv_siglip_index.pkl
 open_clip_model.safetensors
 siglip_tokenizer
-evaluation_results
+evaluation_results/videos
+evaluation_results/retrieved_frames
+grid_search_results/videos
+ablation_results/videos

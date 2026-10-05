@@ -19,6 +19,7 @@ Features:
 """
 
 import argparse
+import concurrent.futures
 import csv
 import json
 import os
@@ -68,7 +69,7 @@ def parse_args():
     parser.add_argument(
         "--max_videos",
         type=int,
-        default=5,
+        default=10,
         help="Maximum number of video/query items to evaluate (default: 5, set -1 for all)",
     )
     parser.add_argument(
@@ -95,6 +96,12 @@ def parse_args():
         default=True,
         help="Save top retrieved frame images for visual inspection in report",
     )
+    parser.add_argument(
+        "--download_timeout",
+        type=int,
+        default=60,
+        help="Timeout in seconds for each video download (default: 60). Set to 0 to disable.",
+    )
     return parser.parse_args()
 
 
@@ -107,8 +114,36 @@ def parse_vid(vid: str) -> Tuple[str, float, float]:
     return youtube_id, start_time, end_time
 
 
-def download_trimmed_video(youtube_id: str, start_time: float, end_time: float, output_path: Path) -> bool:
-    """Download trimmed YouTube video using yt-dlp and ffmpeg."""
+def _run_yt_dlp_download(ydl_opts: dict, url: str) -> None:
+    """Worker function that runs yt-dlp inside a thread (needed for timeout support)."""
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        ydl.download([url])
+
+
+def download_trimmed_video(
+    youtube_id: str,
+    start_time: float,
+    end_time: float,
+    output_path: Path,
+    timeout: int = 60,
+) -> bool:
+    """Download trimmed YouTube video using yt-dlp and ffmpeg.
+
+    Args:
+        youtube_id: YouTube video identifier.
+        start_time: Clip start in seconds.
+        end_time: Clip end in seconds.
+        output_path: Where to write the final .mp4 file.
+        timeout: Max seconds to wait for the download; 0 = no limit.
+
+    Returns:
+        True on success, False if the video is genuinely unavailable/private.
+
+    Raises:
+        TimeoutError: If the download stalls longer than `timeout` seconds.
+                      The caller should halt — not skip — so the video can be
+                      retried on the next run without inflating the sample count.
+    """
     if output_path.exists() and output_path.stat().st_size > 1000:
         return True
 
@@ -117,18 +152,41 @@ def download_trimmed_video(youtube_id: str, start_time: float, end_time: float, 
 
     url = f"https://www.youtube.com/watch?v={youtube_id}"
     ydl_opts = {
-        "format": "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/best[height<=720]/best",
+        # Use bestvideo+bestaudio so FFmpegFD (the only downloader that supports
+        # download_ranges / partial cuts) is always selected. Avoid ext=mp4 / ext=m4a
+        # constraints that can push yt-dlp toward native/DASH protocols incompatible
+        # with partial download.
+        "format": "bestvideo[height<=480]+bestaudio/bestvideo[height<=480]/best[height<=480]/best",
+        "merge_output_format": "mp4",
         "outtmpl": temp_template,
         "ffmpeg_location": os.path.dirname(FFMPEG_EXE),
         "download_ranges": yt_dlp.utils.download_range_func(None, [(start_time, end_time)]),
         "force_keyframes_at_cuts": True,
         "quiet": True,
         "no_warnings": True,
+        # Socket-level timeouts so yt-dlp itself does not stall on a dead connection
+        "socket_timeout": min(timeout, 30) if timeout > 0 else 30,
     }
 
+    def _cleanup_temp() -> None:
+        for f in output_path.parent.glob(output_path.stem + ".tmp.*"):
+            try:
+                f.unlink()
+            except Exception:
+                pass
+
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
+        effective_timeout = timeout if timeout > 0 else None
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_run_yt_dlp_download, ydl_opts, url)
+            try:
+                future.result(timeout=effective_timeout)
+            except concurrent.futures.TimeoutError:
+                _cleanup_temp()
+                raise TimeoutError(
+                    f"Download of {youtube_id} exceeded {timeout}s — "
+                    f"possible network issue. Re-run after restoring connectivity."
+                )
 
         # Find the actual downloaded file and rename to output_path
         candidates = list(output_path.parent.glob(output_path.stem + ".tmp.*"))
@@ -138,17 +196,49 @@ def download_trimmed_video(youtube_id: str, start_time: float, end_time: float, 
                 output_path.unlink()
             downloaded.rename(output_path)
             return True
+    except TimeoutError:
+        raise  # propagate — do not swallow
     except Exception as e:
         print(f"  [Warning] Failed to download {youtube_id} ({start_time}-{end_time}): {e}")
-        # Clean any leftover temp files
-        for f in output_path.parent.glob(output_path.stem + ".tmp.*"):
-            try:
-                f.unlink()
-            except Exception:
-                pass
+        _cleanup_temp()
         return False
 
     return False
+
+
+def download_with_retry(
+    youtube_id: str,
+    start_time: float,
+    end_time: float,
+    output_path: "Path",
+    timeout: int = 60,
+    initial_wait: int = 30,
+    max_wait: int = 300,
+) -> bool:
+    """
+    Wrapper around download_trimmed_video that retries indefinitely on timeout.
+
+    On TimeoutError (network stall) it waits `wait` seconds (exponential backoff,
+    capped at max_wait) then tries again. Returns only when:
+      - True  : download succeeded
+      - False : video is genuinely unavailable / private (non-retryable error)
+    """
+    wait = initial_wait
+    attempt = 0
+    while True:
+        try:
+            return download_trimmed_video(
+                youtube_id, start_time, end_time, output_path, timeout=timeout
+            )
+        except TimeoutError:
+            attempt += 1
+            print(
+                f"  [Timeout] Download stalled (attempt {attempt}). "
+                f"Waiting {wait}s before retry — internet will be re-checked automatically..."
+            )
+            time.sleep(wait)
+            wait = min(wait * 2, max_wait)
+            print(f"  [Retry] Re-attempting download of {youtube_id}...")
 
 
 def calculate_temporal_iou(window1: Tuple[float, float], window2: Tuple[float, float]) -> float:
@@ -333,7 +423,8 @@ def main():
         saliency_scores = item.get("saliency_scores", [])
 
         target_display = args.max_videos if args.max_videos > 0 else len(items)
-        print(f"\n[Evaluating {len(results_records) + 1}/{target_display}] QID {qid} | VID: {vid}")
+        current_num = len(results_records) + 1
+        print(f"\n[Evaluating {current_num}/{target_display}] QID {qid} | VID: {vid}")
         print(f"  Query: \"{query}\"")
         print(f"  Ground Truth Windows: {rel_windows}")
 
@@ -341,12 +432,16 @@ def main():
         video_filename = f"{youtube_id}_{int(start_s)}_{int(end_s)}.mp4"
         video_path = videos_dir / video_filename
 
-        # Download if needed
-        print(f"  Downloading video ({start_s}s - {end_s}s)...")
-        success = download_trimmed_video(youtube_id, start_s, end_s, video_path)
+        # Download if needed — retries automatically on timeout until internet returns
+        print(f"  Downloading video ({start_s}s - {end_s}s)... [timeout: {args.download_timeout}s]")
+        success = download_with_retry(
+            youtube_id, start_s, end_s, video_path, timeout=args.download_timeout
+        )
+
         if not success:
+            # Genuinely unavailable/private — safe to skip
             if args.skip_download_errors:
-                print(f"  [Skipping] Video could not be downloaded (unavailable on YouTube). Moving to next candidate...")
+                print(f"  [Skipping] Video is unavailable on YouTube. Moving to next candidate...")
                 continue
             else:
                 raise RuntimeError(f"Could not download {youtube_id}")

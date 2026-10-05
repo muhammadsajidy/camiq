@@ -1,0 +1,23 @@
+{
+  "dataset": "highlight_train_release.jsonl",
+  "evaluated_samples": 100,
+  "total_eval_time_sec": 9282.56,
+  "metrics": {
+    "hit@1": 0.72,
+    "hit@5": 0.93,
+    "hit@10": 0.99,
+    "recall@1_iou0.5": 0.01,
+    "recall@5_iou0.5": 0.03,
+    "recall@1_iou0.7": 0.01,
+    "recall@5_iou0.7": 0.02,
+    "mrr": 0.8170519999999999,
+    "map": 0.7124699999999998,
+    "mean_saliency_spearman": -0.18463866666666665
+  },
+  "efficiency": {
+    "avg_index_time_sec": 20.817700000000006,
+    "avg_indexed_frames": 49.36,
+    "avg_skipped_static_frames": 22.72,
+    "avg_skipped_semantic_frames": 75.31
+  }
+}

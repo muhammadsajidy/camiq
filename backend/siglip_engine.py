@@ -19,8 +19,8 @@ from pathlib import Path
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-STATIC_PIXEL_DIFF_THRESHOLD = 2.0   # mean abs pixel diff (0-255 scale) below this = static, skip
-SEMANTIC_SIM_THRESHOLD = 0.93       # cosine sim above this = "same as last kept frame", skip
+STATIC_PIXEL_DIFF_THRESHOLD = 8.0   # mean abs pixel diff (0-255 scale) below this = static, skip
+SEMANTIC_SIM_THRESHOLD = 0.88       # cosine sim above this = "same as last kept frame", skip
 
 # Module-level state (loaded once on startup)
 _model = None
